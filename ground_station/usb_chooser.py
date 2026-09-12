@@ -719,6 +719,13 @@ def glyph(kind, colour, px=20):
         path.lineTo(9.0 * s, 13.2 * s)
         path.lineTo(14.0 * s, 7.2 * s)
         p.drawPath(path)
+    elif kind == "play":                    # the triangle everyone knows
+        path = QPainterPath()
+        path.moveTo(6.5 * s, 3.5 * s)
+        path.lineTo(16.5 * s, 10.0 * s)
+        path.lineTo(6.5 * s, 16.5 * s)
+        path.closeSubpath()
+        p.drawPath(path)
     elif kind == "exit":                    # out through a door
         path = QPainterPath()
         path.moveTo(11.5 * s, 3.0 * s)
@@ -972,6 +979,10 @@ class UsbChooser(QDialog):
         self._modal_index = 0
         self._modal_h_dir = 0
         self._modal_saves = None
+        # The full-screen player, while it is up - see _play() and on_inputs().
+        self._player = None
+        self._player_saves = None
+        self._player_h_dir = 0
         self.setWindowTitle("USB DRIVE")
         self.setModal(True)
         # BIGGER, operator 2026-08-26: "big some size in main popup". 760x460
@@ -1027,10 +1038,12 @@ class UsbChooser(QDialog):
         # -- the source list ------------------------------------------------
         self.btn_save = QPushButton("  Save to USB")
         self.btn_delete = QPushButton("  Delete")
+        self.btn_play = QPushButton("  Play")
         self.btn_all = QPushButton("  Select All")
         self.btn_delete_all = QPushButton("  Delete All")
         self.btn_exit = QPushButton("  Eject and Close")
         self._icons = {self.btn_save: "save", self.btn_delete: "trash",
+                       self.btn_play: "play",
                        self.btn_all: "check", self.btn_delete_all: "trash",
                        self.btn_exit: "exit"}
         for b in (self.btn_delete, self.btn_delete_all):
@@ -1042,6 +1055,7 @@ class UsbChooser(QDialog):
             b.setFont(theme.font_for(theme.SUBHEAD, theme.W_MEDIUM))
         self.btn_save.clicked.connect(self._save)
         self.btn_delete.clicked.connect(self._delete)
+        self.btn_play.clicked.connect(self._play)
         self.btn_all.clicked.connect(self._select_all)
         self.btn_delete_all.clicked.connect(self._delete_all)
         self.btn_exit.clicked.connect(self.reject)
@@ -1052,6 +1066,12 @@ class UsbChooser(QDialog):
         side.addWidget(self._section("SELECTED"))
         side.addWidget(self.btn_save)
         side.addWidget(self.btn_delete)
+        side.addSpacing(16)
+        # PLAY acts on the HIGHLIGHTED row, not the ticked ones: watching is a
+        # one-at-a-time thing, and the cursor is already on what the operator
+        # is looking at. Operator 2026-09-12: "give playback option".
+        side.addWidget(self._section("HIGHLIGHTED"))
+        side.addWidget(self.btn_play)
         side.addSpacing(16)
         side.addWidget(self._section("EVERYTHING"))
         side.addWidget(self.btn_all)
@@ -1190,7 +1210,8 @@ class UsbChooser(QDialog):
                _human(total)) if self._rows else "empty")
         self.hint.setText(
             "Joystick to move   \u00b7   SAVE to tick a recording   \u00b7   "
-            "right for the menu, left back to the list"
+            "right for the menu, left back   \u00b7   Play watches the "
+            "highlighted one full screen"
             if self._rows else "No recordings on the Pi.")
         self.title_bar.set_title(self._drive_title())
         self.storage.refresh(self.root)
@@ -1258,6 +1279,10 @@ class UsbChooser(QDialog):
         self.btn_delete.setEnabled(bool(n) and not busy)
         self.btn_all.setEnabled(bool(self._rows) and not busy)
         self.btn_delete_all.setEnabled(bool(self._rows) and not busy)
+        cur = self.list.currentItem()
+        cur_row = cur.data(Qt.UserRole) if cur is not None else None
+        self.btn_play.setEnabled(bool(cur_row) and cur_row[4] == "ready"
+                                 and not busy)
         self.btn_save.setText("  Save to USB" if not n
                               else "  Save to USB  (%d)" % n)
         self.btn_delete.setText("  Delete" if not n
@@ -1302,7 +1327,7 @@ class UsbChooser(QDialog):
     NAV_REPEAT_S = 0.3          # then one step per this many seconds
 
     def _buttons(self):
-        return [self.btn_save, self.btn_delete, self.btn_all,
+        return [self.btn_save, self.btn_delete, self.btn_play, self.btn_all,
                 self.btn_delete_all, self.btn_exit]
 
     def _paint_focus(self):
@@ -1330,6 +1355,12 @@ class UsbChooser(QDialog):
 
     def on_inputs(self, snap):
         """One inputs.py snapshot per UI frame. Safe to call at frame rate."""
+        # THE PLAYER TAKES THE WHOLE STICK WHILE IT IS UP, for the same reason
+        # the confirm popup below does: nothing behind a full-screen video
+        # should move, and SAVE means "leave", not "tick a row".
+        if self._player is not None:
+            self._player_inputs(snap)
+            return
         # THE CONFIRM POPUP TAKES THE WHOLE STICK WHILE IT IS UP.
         #
         # QMessageBox.exec() runs a NESTED event loop, so main.py's UI timer
@@ -1423,6 +1454,84 @@ class UsbChooser(QDialog):
             if btn.isEnabled():
                 btn.click()
 
+    # -- playback -------------------------------------------------------------
+
+    def _play(self):
+        """Watch the highlighted recording full screen. SAVE brings this back.
+
+        Not modal - see playback.py. The chooser keeps receiving snapshots and
+        on_inputs() routes them to _player_inputs() while _player is set.
+        """
+        item = self.list.currentItem()
+        row = item.data(Qt.UserRole) if item is not None else None
+        if not row or row[4] != "ready" or self._player is not None:
+            return
+        finals, _working = session_files(row[1])
+        if not finals:
+            return
+        # The front camera's file when there is one - it is the camera an
+        # operator opens first - otherwise whatever the session holds.
+        name = next((f for f in finals if f.lower().startswith("1_")),
+                    finals[0])
+        from playback import PlaybackView
+        try:
+            player = PlaybackView(os.path.join(row[1], name), row[0])
+        except Exception as exc:            # never take the chooser down
+            self.hint.setText("Cannot play: %s" % exc)
+            return
+        self._player = player
+        # Primed to None so the FIRST snapshot only records the count: the
+        # press that opened the player must not also close it.
+        self._player_saves = None
+        self._player_h_dir = 0
+        player.finished.connect(self._player_done)
+        player.start()
+
+    def _player_inputs(self, snap):
+        """Drive the player from the stick: left / right skip, SAVE leaves.
+
+        Edge-triggered on both, like _modal_inputs: holding the stick over
+        must not keep skipping, and the SAVE count is compared with > so a
+        counter reset cannot fire a phantom press.
+        """
+        joy = (snap or {}).get("joy") or {}
+        h = _stick_lr(joy)
+        if h is not None and abs(h) >= self.NAV_DEADBAND:
+            if self._player_h_dir == 0:
+                self._player_h_dir = 1 if h > 0 else -1
+                if self._player is not None:
+                    from playback import SKIP_S
+                    self._player.skip(SKIP_S if h > 0 else -SKIP_S)
+        else:
+            self._player_h_dir = 0
+
+        presses = (snap or {}).get("save_presses")
+        if presses is not None and presses != self._player_saves:
+            fire = (self._player_saves is not None
+                    and presses > self._player_saves)
+            self._player_saves = presses
+            if fire:
+                self._player_done()
+
+    def _player_done(self):
+        """Close the player - on SAVE, at the end of the file, or on eject."""
+        player, self._player = self._player, None
+        if player is not None:
+            try:
+                player.finished.disconnect(self._player_done)
+            except Exception:
+                pass
+            player.stop()
+            player.deleteLater()
+        # HAND THE PRESS COUNT BACK - the same trap _confirm() documents. The
+        # press that closed the player would otherwise look brand new to
+        # on_inputs and press Play again.
+        if self._player_saves is not None:
+            self._saves_seen = self._player_saves
+        self._player_saves = None
+        self._player_h_dir = 0
+        self.activateWindow()
+
     # -- actions --------------------------------------------------------------
 
     def reject(self):
@@ -1439,6 +1548,8 @@ class UsbChooser(QDialog):
         Answering the popup first unwinds its loop, and NO is the right answer
         to force - the operator never confirmed, and the stick has gone anyway.
         """
+        if self._player is not None:
+            self._player_done()             # the stick went away mid-playback
         if self._modal is not None:
             try:
                 self._modal.done(QMessageBox.No)
