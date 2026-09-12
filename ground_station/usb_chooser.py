@@ -1253,7 +1253,7 @@ class UsbChooser(QDialog):
                _human(total)) if self._rows else "empty")
         self.hint.setText(
             "Joystick to move   \u00b7   SAVE to tick a recording   \u00b7   "
-            "right onto a row's Play, right again for the menu, left back"
+            "left for the menu   \u00b7   right onto a row's Play"
             if self._rows else "No recordings on the Pi.")
         self.title_bar.set_title(self._drive_title())
         self.storage.refresh(self.root)
@@ -1368,11 +1368,14 @@ class UsbChooser(QDialog):
         return [self.btn_save, self.btn_delete, self.btn_all,
                 self.btn_delete_all, self.btn_exit]
 
-    # THREE COLUMNS UNDER THE STICK, left to right: the list, the PLAY chip on
-    # the cursor row, the menu. Right steps one column over, left steps back.
-    # The chip column is skipped when the cursor row has no chip (still
-    # processing), so the stick never lands on nothing.
-    ZONES = ("list", "play", "buttons")
+    # THREE COLUMNS UNDER THE STICK, laid out the way the window is: the menu
+    # on the LEFT, the list in the middle, the PLAY chip at the RIGHT end of
+    # the cursor row. Left steps one column over, right steps back, so the
+    # stick moves the way the eye does. Operator 2026-09-12: "on left
+    # joystick option it should go to option of save to usb, delete and all".
+    # A cursor row with no chip (still processing) has nothing to the right,
+    # so a right push there stays put rather than landing on nothing.
+    ZONES = ("buttons", "list", "play")
 
     def _current_ready(self):
         item = self.list.currentItem()
@@ -1461,8 +1464,7 @@ class UsbChooser(QDialog):
                 i = self.ZONES.index(self._zone) + self._h_dir
                 want = self.ZONES[max(0, min(len(self.ZONES) - 1, i))]
                 if want == "play" and not self._current_ready():
-                    i += self._h_dir            # no chip here: step past it
-                    want = self.ZONES[max(0, min(len(self.ZONES) - 1, i))]
+                    want = self._zone           # no chip on this row: stay
                 if want != self._zone:
                     self._zone = want
                     if self._zone == "buttons":
