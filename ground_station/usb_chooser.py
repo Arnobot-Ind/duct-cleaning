@@ -636,16 +636,22 @@ def _stick_lr(joy):
     confirm popup still reading `y` for a left/right choice, so forward and back
     moved between Yes and No. Two call sites, one fixed, one missed.
 
-    THE NEGATION IS MEASURED, not derived. inputs.py has INVERT_X = 1, which the
-    drive path needs because the motor outputs are crossed as well - see the note
-    on that constant. Only the PAIR is observable at the wheels, so the value
-    arriving here is not the one under the operator's hand, and this window has
-    no motors to cancel against. Operator, driving it: "in left right is swped".
+    THE SIGN IS MEASURED, not derived, and it has now been measured twice with
+    opposite answers - so measure again before touching it. 2026-09-02 it was
+    negated ("in left right is swped"). 2026-09-12, with the PLAY chip on the
+    row, the operator reported the opposite: "when from joystick i right side
+    then play option should get activated ... currently left side then get
+    option". ~/motor_cam.log for those minutes shows every push driving the
+    raw x count DOWN (8800 -> 600..5000), never up, and inputs.py's INVERT_X=1
+    turns that into a POSITIVE joy["x"] - so the value arriving here already
+    means physically right, and negating it was what sent the stick the wrong
+    way. Straight through now. Every left/right in this window and its popups
+    comes through here, so they all agree.
 
-    Returns None when the axis is dead, which both callers already handle.
+    Returns None when the axis is dead, which every caller already handles.
     """
     x = joy.get("x")
-    return None if x is None else -x
+    return None if x is None else x
 
 
 def _centre_on_parent(dlg):
