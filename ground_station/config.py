@@ -105,6 +105,16 @@ def camera_recorded(index):
 VIEW_SINGLE = os.environ.get("VIEW_SINGLE", "1") == "1"
 VIEW_START_CAMERA = int(os.environ.get("VIEW_START_CAMERA", "1") or 1)
 
+# HOLD SAVE THIS LONG TO OPEN PLAYBACK WITHOUT A STICK. Operator 2026-09-12:
+# "save button pressed for 10 seconds open this window with just play for
+# playback". It is the USB card cut down to the list, a Play chip on every
+# finished recording and a Close in the menu - nothing that copies or deletes.
+PLAYBACK_HOLD_S = float(os.environ.get("PLAYBACK_HOLD_S", "10"))
+# A press held longer than this is not a tap. The camera swap (VIEW_SINGLE)
+# waits for the RELEASE of a tap and is dropped once the hold passes this, so
+# a hold on its way to the playback window never flips the picture first.
+SAVE_TAP_MAX_S = float(os.environ.get("SAVE_TAP_MAX_S", "1.0"))
+
 
 # (label, url) pairs rendered left-to-right in the GUI.
 CAMERAS = [

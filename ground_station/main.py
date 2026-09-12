@@ -19,8 +19,9 @@ inputs.py for the live pin map):
 
     switch 1, GPIO11 ... START / STOP
     switch 2, GPIO17 ... PAUSE / RESUME, inside the same file
-    button,   GPIO5 .... SAVE - swaps which camera is on screen; inside the
-                         USB chooser popup it ticks the row instead
+    button,   GPIO5 .... SAVE - a tap swaps which camera is on screen; held
+                         for PLAYBACK_HOLD_S it opens the playback window;
+                         inside the USB chooser popup it ticks the row
 
 Keys:
     F        fullscreen toggle        S       snapshot both panels
@@ -763,6 +764,8 @@ class GroundStationWindow(QWidget):
         # visible one takes the whole width.
         self._shown = None
         self._swap_last = None
+        self._swap_armed = False        # a tap in progress - see _save_button
+        self._hold_fired = False        # this hold has opened playback already
         if config.VIEW_SINGLE and len(self.panels) > 1:
             self.solo(max(0, min(len(self.panels) - 1,
                                  config.VIEW_START_CAMERA - 1)))
@@ -990,8 +993,16 @@ class GroundStationWindow(QWidget):
         state = (usb or {}).get("state")
         dev = (usb or {}).get("device")
         mount = (usb or {}).get("mount")
+        playback = (self._usb_dialog is not None
+                    and getattr(self._usb_dialog, "playback_only", False))
 
         if state == "mounted" and mount and dev != self._usb_dev_shown:
+            if playback:
+                # A stick arriving outranks the playback window: the operator
+                # plugged it in to move files. Same window, full menu.
+                self._usb_dialog.reject()
+                self._usb_dialog = None
+                playback = False
             if self._usb_dialog is None:
                 try:
                     from usb_chooser import UsbChooser
@@ -1004,14 +1015,36 @@ class GroundStationWindow(QWidget):
                     self._usb_dialog = None
 
         # The stick went away. Close it rather than leaving buttons pointed at
-        # a mountpoint that is no longer there.
-        if state in (None, "idle") and self._usb_dialog is not None:
+        # a mountpoint that is no longer there. The playback window has no
+        # stick behind it and is left alone.
+        if (state in (None, "idle") and self._usb_dialog is not None
+                and not playback):
             self._usb_dialog.reject()
             self._usb_dialog = None
             self._usb_dev_shown = None
 
     def _usb_dialog_closed(self, _result):
         self._usb_dialog = None
+
+    def _open_playback(self):
+        """The USB card without a stick: the list and a Play per recording.
+
+        Opened by holding SAVE for config.PLAYBACK_HOLD_S - see _save_button.
+        It takes the _usb_dialog slot on purpose: everything that already
+        treats "a popup owns the panel" (input routing, recording held off,
+        the swap primer dropped) then applies to it for free.
+        """
+        if self._usb_dialog is not None:
+            return
+        try:
+            from usb_chooser import UsbChooser
+            self._usb_dialog = UsbChooser(config.RECORD_DIR, None, self,
+                                          playback_only=True)
+            self._usb_dialog.finished.connect(self._usb_dialog_closed)
+            self._usb_dialog.show()
+        except Exception as exc:          # never take the viewer down
+            print("playback window failed: %s" % exc, flush=True)
+            self._usb_dialog = None
 
     def _session_state(self, snapshot):
         """Switch state if the panel is readable, otherwise the keyboard latch.
@@ -1040,27 +1073,45 @@ class GroundStationWindow(QWidget):
         current = self._shown if self._shown is not None else 0
         self.solo((current + 1) % len(self.panels))
 
-    def _swap_on_save(self, presses):
-        """One camera swap per new SAVE press - see config.VIEW_SINGLE.
+    def _save_button(self, presses, held_s):
+        """The SAVE button outside any popup: a tap swaps, a hold opens playback.
 
-        Same edge discipline as SessionManager.on_save_button: the first value
-        only primes the counter, so a viewer restarted mid-shift does not swap
-        on a press it never saw; a counter that has gone DOWN re-primes, because
-        the reader zeroes it whenever it loses the pins and everything after
-        that would otherwise be swallowed until it climbed back past the old
-        count. The USB chooser owns the button while it is open - _tick_body
-        drops the primer then, so presses spent ticking rows in the popup
-        cannot flip the picture the instant it closes.
+        A TAP SWAPS ON RELEASE, not on the press. The same button held for
+        config.PLAYBACK_HOLD_S opens the playback window, and every hold
+        begins with a press - swapping on the press would flip the picture on
+        the way to the window every time. So a new press only ARMS the swap;
+        it fires when the button comes back up, and it is disarmed the moment
+        the hold passes config.SAVE_TAP_MAX_S. The cost is the length of a
+        tap, about 200 ms.
+
+        Press counting keeps SessionManager.on_save_button's discipline: prime
+        on the first value, act on a rise, re-prime when the count goes DOWN
+        (the reader zeroes it whenever it loses the pins). _tick_body drops
+        the primer while a popup is open, so presses spent in it never swap
+        the picture the instant it closes. `held_s` is the reader's debounced
+        hold: a hair above zero on the press sample, exactly 0.0 once released.
         """
-        if not config.VIEW_SINGLE:
-            return
         presses = presses or 0
+        held = held_s or 0.0
         if self._swap_last is None or presses < self._swap_last:
             self._swap_last = presses
-            return
-        if presses > self._swap_last:
+            self._swap_armed = False
+        elif presses > self._swap_last:
             self._swap_last = presses
+            self._swap_armed = config.VIEW_SINGLE
+        if self._swap_armed and held > config.SAVE_TAP_MAX_S:
+            self._swap_armed = False        # a hold, not a tap
+        if self._swap_armed and held <= 0.0:
+            self._swap_armed = False        # released: the tap is complete
             self.swap_camera()
+
+        # The hold. Fires once per hold; only a release re-arms it.
+        if held >= config.PLAYBACK_HOLD_S:
+            if not self._hold_fired:
+                self._hold_fired = True
+                self._open_playback()
+        elif held <= 0.0:
+            self._hold_fired = False
 
     def toggle_fullscreen(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
@@ -1193,11 +1244,14 @@ class GroundStationWindow(QWidget):
             # set_state() sees the real switch again and carries on.
             self._usb_dialog.on_inputs(snapshot)
             self._swap_last = None
+            self._swap_armed = False
         else:
             self.session.set_state(self._session_state(snapshot))
             self.session.on_save_button(snapshot.get("save_presses"))
-            # Outside the popup the SAVE button swaps the camera on screen.
-            self._swap_on_save(snapshot.get("save_presses"))
+            # Outside a popup the SAVE button is the viewer's: a tap swaps
+            # the camera on screen, a long hold opens playback.
+            self._save_button(snapshot.get("save_presses"),
+                              snapshot.get("save_held_s"))
         # The hold level as well as the press edges: holding SAVE for 3s after
         # a stop is what finalizes the recording into /recordings.
         if self._usb_dialog is None:

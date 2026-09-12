@@ -869,6 +869,7 @@ class SessionDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.focused = True         # does the LIST hold panel focus just now
         self.play_focused = False   # is the stick on the cursor row's PLAY chip
+        self.ticks = True           # False in playback-only: nothing to choose
 
     def sizeHint(self, _option, _index):
         return QSize(0, self.ROW_H)
@@ -947,7 +948,7 @@ class SessionDelegate(QStyledItemDelegate):
         # box invites a press to see what happens; leaving the slot empty
         # says there is nothing to press.
         box = QRectF(r.left() + 14, r.center().y() - 10, 20, 20)
-        if working:
+        if working or not self.ticks:
             pass
         elif checked:
             p.setPen(Qt.NoPen)
@@ -1011,10 +1012,15 @@ class SessionDelegate(QStyledItemDelegate):
 class UsbChooser(QDialog):
     """The popup itself. Opened by main.py when a stick reports `mounted`."""
 
-    def __init__(self, root, mount, parent=None):
+    def __init__(self, root, mount, parent=None, playback_only=False):
         super().__init__(parent)
         self.root = root
         self.mount = mount
+        # PLAYBACK ONLY: the same window with no stick behind it, opened by
+        # holding SAVE (main.py, config.PLAYBACK_HOLD_S). Everything that
+        # moves a file is hidden; what is left is the list, a Play chip per
+        # finished recording, and Close. Operator 2026-09-12.
+        self.playback_only = bool(playback_only)
         self._worker = None
         self._popup = None
         # Panel-navigation state - see on_inputs().
@@ -1112,11 +1118,13 @@ class UsbChooser(QDialog):
         side = QVBoxLayout()
         side.setContentsMargins(9, 12, 9, 14)
         side.setSpacing(2)
-        side.addWidget(self._section("SELECTED"))
+        self.sec_selected = self._section("SELECTED")
+        self.sec_everything = self._section("EVERYTHING")
+        side.addWidget(self.sec_selected)
         side.addWidget(self.btn_save)
         side.addWidget(self.btn_delete)
         side.addSpacing(16)
-        side.addWidget(self._section("EVERYTHING"))
+        side.addWidget(self.sec_everything)
         side.addWidget(self.btn_all)
         side.addWidget(self.btn_delete_all)
         # EXIT sits at the BOTTOM, pushed there by the stretch, so it is the
@@ -1125,6 +1133,12 @@ class UsbChooser(QDialog):
         # closes a window, the other erases every recording on the Pi.
         side.addStretch(1)
         side.addWidget(self.btn_exit)
+        if self.playback_only:
+            for wdg in (self.sec_selected, self.btn_save, self.btn_delete,
+                        self.sec_everything, self.btn_all, self.btn_delete_all):
+                wdg.hide()
+            self.btn_exit.setText("  Close")
+            self.setWindowTitle("PLAYBACK")
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(self.SIDEBAR_W)
@@ -1144,6 +1158,7 @@ class UsbChooser(QDialog):
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.list.setFrameShape(QListWidget.NoFrame)
         self._delegate = SessionDelegate(self.list)
+        self._delegate.ticks = not self.playback_only
         self.list.setItemDelegate(self._delegate)
         self.list.currentRowChanged.connect(lambda _r: self._sync_buttons())
         self.list.itemChanged.connect(lambda _i: self._sync_buttons())
@@ -1192,6 +1207,8 @@ class UsbChooser(QDialog):
         pair is total first, then what is still free, which is the order the
         operator asked for.
         """
+        if self.playback_only:
+            return "PLAYBACK"
         total, avail = usb_space(self.mount)
         if not total:
             return usb_label(self.mount)
@@ -1251,10 +1268,15 @@ class UsbChooser(QDialog):
             "%d recording%s   \u00b7   %s"
             % (len(self._rows), "" if len(self._rows) == 1 else "s",
                _human(total)) if self._rows else "empty")
-        self.hint.setText(
-            "Joystick to move   \u00b7   SAVE to tick a recording   \u00b7   "
-            "left for the menu   \u00b7   right onto a row's Play"
-            if self._rows else "No recordings on the Pi.")
+        if not self._rows:
+            hint = "No recordings on the Pi."
+        elif self.playback_only:
+            hint = ("Joystick to move   \u00b7   SAVE plays the highlighted "
+                    "recording   \u00b7   left for Close")
+        else:
+            hint = ("Joystick to move   \u00b7   SAVE to tick a recording   "
+                    "\u00b7   left for the menu   \u00b7   right onto a row's Play")
+        self.hint.setText(hint)
         self.title_bar.set_title(self._drive_title())
         self.storage.refresh(self.root)
         self._sync_buttons()
@@ -1365,6 +1387,8 @@ class UsbChooser(QDialog):
     NAV_REPEAT_S = 0.3          # then one step per this many seconds
 
     def _buttons(self):
+        if self.playback_only:
+            return [self.btn_exit]
         return [self.btn_save, self.btn_delete, self.btn_all,
                 self.btn_delete_all, self.btn_exit]
 
@@ -1510,7 +1534,9 @@ class UsbChooser(QDialog):
     def _activate(self):
         """SAVE pressed: tick the row, play it, or press the focused button."""
         if self._zone == "list":
-            self._toggle_current()
+            # Nothing to tick in playback-only: a press on the row just plays
+            # it, which is the one thing the operator opened the window for.
+            self._play() if self.playback_only else self._toggle_current()
         elif self._zone == "play":
             self._play()
         else:
