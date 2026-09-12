@@ -182,15 +182,29 @@ class PlaybackView(QWidget):
         p.fillRect(QRectF(track.x(), track.y(), track.width() * frac, 4),
                    QColor(theme.DARK["blue"]))
 
-        text = QRectF(24, bar.y() + 20, w - 48, bar_h - 24)
-        p.setPen(QColor("#FFFFFF"))
-        p.setFont(theme.font_for(theme.SUBHEAD, theme.W_SEMIBOLD))
-        p.drawText(text, Qt.AlignLeft | Qt.AlignVCenter,
-                   self._error or self.title)
+        # Laid out from the RIGHT: the hint, then the clock, and the title gets
+        # whatever is left and is elided to fit it. A centred clock collided
+        # with a session name at 800 px wide - the names are long, and nothing
+        # here may ever overprint the way out.
+        ty, th = bar.y() + 20, bar_h - 24
+        gap, edge = 28, w - 24
+        hint = "◀ ▶  skip 10 s   ·   SAVE to exit"
+        clock = "%s / %s" % (_hms(self.position), _hms(self.duration))
         p.setFont(theme.font_for(theme.SUBHEAD, theme.W_REGULAR))
-        p.drawText(text, Qt.AlignHCenter | Qt.AlignVCenter,
-                   "%s / %s" % (_hms(self.position), _hms(self.duration)))
+        fm = p.fontMetrics()
+        hint_w = fm.horizontalAdvance(hint)
+        clock_w = fm.horizontalAdvance(clock)
         p.setPen(QColor(255, 255, 255, 170))
-        p.drawText(text, Qt.AlignRight | Qt.AlignVCenter,
-                   "◀ ▶  skip 10 s   ·   SAVE to exit")
+        p.drawText(QRectF(edge - hint_w, ty, hint_w, th),
+                   Qt.AlignLeft | Qt.AlignVCenter, hint)
+        x_clock = edge - hint_w - gap - clock_w
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(QRectF(x_clock, ty, clock_w, th),
+                   Qt.AlignLeft | Qt.AlignVCenter, clock)
+        p.setFont(theme.font_for(theme.SUBHEAD, theme.W_SEMIBOLD))
+        avail = max(0, int(x_clock - gap - 24))
+        title = p.fontMetrics().elidedText(self._error or self.title,
+                                           Qt.ElideMiddle, avail)
+        p.drawText(QRectF(24, ty, avail, th), Qt.AlignLeft | Qt.AlignVCenter,
+                   title)
         p.end()
