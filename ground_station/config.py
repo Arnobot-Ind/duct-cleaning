@@ -710,6 +710,14 @@ RECORD_TIMESTAMP_FORMAT = os.environ.get("RECORD_TIMESTAMP_FORMAT",
 # 1.0 is solid white; the spec asked for slightly transparent.
 RECORD_TIMESTAMP_ALPHA = float(os.environ.get("RECORD_TIMESTAMP_ALPHA", "0.85"))
 
+# THE SAME STAMP ON THE LIVE PANELS. Operator 2026-09-12: "this also show in
+# normal camera view cam1 front and cam2 back". Drawn by the canvas in Qt over
+# the picture, top-right of the VISIBLE video rectangle, same format, same
+# size rule and the same white-over-dark-halo look as the recorded one - so
+# what the operator sees on the screen is what the file will show. Nothing
+# here touches the frame buffer or the recorder; it is paint only.
+VIEW_TIMESTAMP = os.environ.get("VIEW_TIMESTAMP", "1") == "1"
+
 # Re-encode the per-camera masters AFTER a save so the two cameras produce files
 # of the same SIZE, not merely the same pixel dimensions (operator spec
 # 2026-08-19: "one file store too much size and other low").

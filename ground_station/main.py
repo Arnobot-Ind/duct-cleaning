@@ -45,7 +45,7 @@ import traceback
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
-from PySide6.QtGui import (QColor, QFont, QImage, QPainter, QPainterPath, QPen,
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen,
                            QPixmap, QPolygonF, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (
     QApplication,
@@ -188,6 +188,45 @@ class VideoCanvas(QWidget):
         self._message = message
         self.update()
 
+    def _paint_timestamp(self, painter, target):
+        """The recorder's OSD clock, on the live picture - config.VIEW_TIMESTAMP.
+
+        Anchored to the top-right of the VISIBLE part of the video rectangle:
+        at VIDEO_ZOOM 1.0 the blit covers the canvas and `target` runs past
+        its edges, so the corner of the picture the operator can see is the
+        corner that gets the stamp. Same size rule as recorder.TimestampOsd
+        (glyphs a 32nd of the picture's height, inset a 45th), the same
+        monospaced face, white over a thin dark halo. A QPainterPath so the
+        halo is a real stroke and not four offset copies.
+        """
+        vis = target.intersected(QRectF(self.rect()))
+        if vis.isEmpty():
+            return
+        h = vis.height()
+        px = max(12, int(h) // 32)
+        margin = max(6, int(h) // 45)
+        font = QFont("DejaVu Sans Mono")
+        font.setBold(True)
+        font.setPixelSize(px)
+        # Fixed pitch or nothing: a proportional fallback would make the
+        # stamp breathe as the digits change, which is what "digital" forbids.
+        font.setStyleHint(QFont.Monospace, QFont.PreferDefault)
+        font.setFixedPitch(True)
+        text = datetime.now().strftime(config.RECORD_TIMESTAMP_FORMAT)
+        fm = QFontMetricsF(font)
+        w = fm.horizontalAdvance(text)
+        x = vis.right() - margin - w
+        y = vis.top() + margin + fm.ascent()
+        path = QPainterPath()
+        path.addText(x, y, font, text)
+        alpha = max(0.0, min(1.0, config.RECORD_TIMESTAMP_ALPHA))
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(QColor(0, 0, 0, int(190 * alpha)), 2.6,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+        painter.fillPath(path, QColor(255, 255, 255, int(255 * alpha)))
+
     def _blit_rects(self, pixmap):
         """(source, target) rectangles for config.VIDEO_ZOOM. None if unpaintable.
 
@@ -247,6 +286,8 @@ class VideoCanvas(QWidget):
             # decode too, and this runs once per panel per frame.
             source, target = rects
             painter.drawPixmap(target, self._pixmap, source)
+            if config.VIEW_TIMESTAMP:
+                self._paint_timestamp(painter, target)
         else:
             # THE PLACEHOLDER NOW DISTINGUISHES TRYING FROM FAILED, which the
             # single red never did: "CONNECTING..." in the same red as "NO
