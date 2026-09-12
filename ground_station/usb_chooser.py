@@ -853,10 +853,16 @@ class SessionDelegate(QStyledItemDelegate):
     """
 
     ROW_H = 56
+    # The PLAY chip at the right end of every ready row. Operator 2026-09-12:
+    # "show specific video on video right, keep play option instead of left
+    # side" - the control lives on the thing it acts on, not in the menu.
+    CHIP_W = 92
+    CHIP_H = 30
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.focused = True         # does the LIST hold panel focus just now
+        self.play_focused = False   # is the stick on the cursor row's PLAY chip
 
     def sizeHint(self, _option, _index):
         return QSize(0, self.ROW_H)
@@ -883,12 +889,52 @@ class SessionDelegate(QStyledItemDelegate):
         # the same statement, and conflating them is how the wrong session gets
         # erased. Blue only while the list holds focus; when focus is in the
         # sidebar the cursor drops to grey, exactly as Finder does.
+        # The row stays blue with the stick on its PLAY chip too: the chip is
+        # part of the row, and a row that went grey the moment the stick moved
+        # onto its own button would read as focus having LEFT the list.
+        lit = self.focused or self.play_focused
         if cursor:
             p.setPen(Qt.NoPen)
-            p.setBrush(qcol(ACCENT) if self.focused
+            p.setBrush(qcol(ACCENT) if lit
                        else qcol("rgba(255, 255, 255, 0.10)"))
             p.drawRoundedRect(r, 7, 7)
-        on_blue = cursor and self.focused
+        on_blue = cursor and lit
+
+        # -- the PLAY chip, right end ---------------------------------------
+        # Only on a ready row - a session still merging has no chip, for the
+        # same reason it has no tick box. INVERTED (white on blue) when the
+        # stick is on it: that is the one state in which SAVE means "play".
+        chip = QRectF(r.right() - 14 - self.CHIP_W,
+                      r.center().y() - self.CHIP_H / 2.0,
+                      self.CHIP_W, self.CHIP_H)
+        if not working:
+            hot = cursor and self.play_focused
+            p.setPen(Qt.NoPen)
+            if hot:
+                p.setBrush(QColor("#ffffff"))
+            elif on_blue:
+                p.setBrush(QColor(255, 255, 255, 46))
+            else:
+                p.setBrush(QColor(255, 255, 255, 22))
+            p.drawRoundedRect(chip, self.CHIP_H / 2.0, self.CHIP_H / 2.0)
+            ink = qcol(ACCENT) if hot else QColor(255, 255, 255,
+                                                   255 if on_blue else 200)
+            tri = QPainterPath()
+            tx0, ty0 = chip.left() + 16, chip.center().y()
+            tri.moveTo(tx0, ty0 - 6)
+            tri.lineTo(tx0 + 10, ty0)
+            tri.lineTo(tx0, ty0 + 6)
+            tri.closeSubpath()
+            p.setBrush(ink)
+            p.drawPath(tri)
+            p.setPen(ink)
+            p.setFont(theme.font_for(theme.FOOTNOTE, theme.W_SEMIBOLD))
+            p.drawText(QRectF(chip.left() + 32, chip.top(),
+                              chip.width() - 40, chip.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, "Play")
+        # Text stops short of the chip whether or not one is drawn, so the
+        # name never changes length as a session finishes processing.
+        text_w = chip.left() - 16
 
         # -- the tick box --------------------------------------------------
         # A session still being merged has no box at all. Greying a tick
@@ -922,7 +968,7 @@ class SessionDelegate(QStyledItemDelegate):
         tx = r.left() + 94
         p.setFont(theme.font_for(theme.SUBHEAD, theme.W_SEMIBOLD))
         p.setPen(QColor("#ffffff") if (on_blue or True) else qcol(TEXT))
-        p.drawText(QRectF(tx, r.top() + 8, r.width() - 110, 20),
+        p.drawText(QRectF(tx, r.top() + 8, text_w - tx, 20),
                    Qt.AlignLeft | Qt.AlignVCenter, name)
 
         p.setFont(theme.font_for(theme.FOOTNOTE, theme.W_SEMIBOLD if working
@@ -934,7 +980,7 @@ class SessionDelegate(QStyledItemDelegate):
         else:
             p.setPen(QColor(255, 255, 255, 200) if on_blue else qcol(MUTED))
             line = "%s   \u00b7   %s" % (_human(size), when)
-        p.drawText(QRectF(tx, r.bottom() - 26, r.width() - 110, 18),
+        p.drawText(QRectF(tx, r.bottom() - 26, text_w - tx, 18),
                    Qt.AlignLeft | Qt.AlignVCenter, line)
         p.restore()
 
@@ -1038,12 +1084,10 @@ class UsbChooser(QDialog):
         # -- the source list ------------------------------------------------
         self.btn_save = QPushButton("  Save to USB")
         self.btn_delete = QPushButton("  Delete")
-        self.btn_play = QPushButton("  Play")
         self.btn_all = QPushButton("  Select All")
         self.btn_delete_all = QPushButton("  Delete All")
         self.btn_exit = QPushButton("  Eject and Close")
         self._icons = {self.btn_save: "save", self.btn_delete: "trash",
-                       self.btn_play: "play",
                        self.btn_all: "check", self.btn_delete_all: "trash",
                        self.btn_exit: "exit"}
         for b in (self.btn_delete, self.btn_delete_all):
@@ -1055,7 +1099,6 @@ class UsbChooser(QDialog):
             b.setFont(theme.font_for(theme.SUBHEAD, theme.W_MEDIUM))
         self.btn_save.clicked.connect(self._save)
         self.btn_delete.clicked.connect(self._delete)
-        self.btn_play.clicked.connect(self._play)
         self.btn_all.clicked.connect(self._select_all)
         self.btn_delete_all.clicked.connect(self._delete_all)
         self.btn_exit.clicked.connect(self.reject)
@@ -1066,12 +1109,6 @@ class UsbChooser(QDialog):
         side.addWidget(self._section("SELECTED"))
         side.addWidget(self.btn_save)
         side.addWidget(self.btn_delete)
-        side.addSpacing(16)
-        # PLAY acts on the HIGHLIGHTED row, not the ticked ones: watching is a
-        # one-at-a-time thing, and the cursor is already on what the operator
-        # is looking at. Operator 2026-09-12: "give playback option".
-        side.addWidget(self._section("HIGHLIGHTED"))
-        side.addWidget(self.btn_play)
         side.addSpacing(16)
         side.addWidget(self._section("EVERYTHING"))
         side.addWidget(self.btn_all)
@@ -1210,8 +1247,7 @@ class UsbChooser(QDialog):
                _human(total)) if self._rows else "empty")
         self.hint.setText(
             "Joystick to move   \u00b7   SAVE to tick a recording   \u00b7   "
-            "right for the menu, left back   \u00b7   Play watches the "
-            "highlighted one full screen"
+            "right onto a row's Play, right again for the menu, left back"
             if self._rows else "No recordings on the Pi.")
         self.title_bar.set_title(self._drive_title())
         self.storage.refresh(self.root)
@@ -1279,10 +1315,6 @@ class UsbChooser(QDialog):
         self.btn_delete.setEnabled(bool(n) and not busy)
         self.btn_all.setEnabled(bool(self._rows) and not busy)
         self.btn_delete_all.setEnabled(bool(self._rows) and not busy)
-        cur = self.list.currentItem()
-        cur_row = cur.data(Qt.UserRole) if cur is not None else None
-        self.btn_play.setEnabled(bool(cur_row) and cur_row[4] == "ready"
-                                 and not busy)
         self.btn_save.setText("  Save to USB" if not n
                               else "  Save to USB  (%d)" % n)
         self.btn_delete.setText("  Delete" if not n
@@ -1327,8 +1359,19 @@ class UsbChooser(QDialog):
     NAV_REPEAT_S = 0.3          # then one step per this many seconds
 
     def _buttons(self):
-        return [self.btn_save, self.btn_delete, self.btn_play, self.btn_all,
+        return [self.btn_save, self.btn_delete, self.btn_all,
                 self.btn_delete_all, self.btn_exit]
+
+    # THREE COLUMNS UNDER THE STICK, left to right: the list, the PLAY chip on
+    # the cursor row, the menu. Right steps one column over, left steps back.
+    # The chip column is skipped when the cursor row has no chip (still
+    # processing), so the stick never lands on nothing.
+    ZONES = ("list", "play", "buttons")
+
+    def _current_ready(self):
+        item = self.list.currentItem()
+        row = item.data(Qt.UserRole) if item is not None else None
+        return bool(row) and row[4] == "ready"
 
     def _paint_focus(self):
         """Move the highlight, and re-render the icons that go white under it.
@@ -1351,6 +1394,7 @@ class UsbChooser(QDialog):
             b.style().unpolish(b)
             b.style().polish(b)
         self._delegate.focused = (self._zone == "list")
+        self._delegate.play_focused = (self._zone == "play")
         self.list.viewport().update()
 
     def on_inputs(self, snap):
@@ -1403,11 +1447,16 @@ class UsbChooser(QDialog):
         if step:
             self._move(step)
 
-        # Horizontal: swap column. Edge only - holding right must not walk off.
+        # Horizontal: step one column. Edge only - holding right must not
+        # walk off. See ZONES.
         if x is not None and abs(x) >= self.NAV_DEADBAND:
-            want = "buttons" if x > 0 else "list"
             if self._h_dir == 0:
                 self._h_dir = 1 if x > 0 else -1
+                i = self.ZONES.index(self._zone) + self._h_dir
+                want = self.ZONES[max(0, min(len(self.ZONES) - 1, i))]
+                if want == "play" and not self._current_ready():
+                    i += self._h_dir            # no chip here: step past it
+                    want = self.ZONES[max(0, min(len(self.ZONES) - 1, i))]
                 if want != self._zone:
                     self._zone = want
                     if self._zone == "buttons":
@@ -1426,11 +1475,16 @@ class UsbChooser(QDialog):
             self._saves_seen = presses
 
     def _move(self, step):
-        if self._zone == "list":
+        if self._zone in ("list", "play"):
             n = self.list.count()
             if n:
                 self.list.setCurrentRow(max(0, min(n - 1,
                                                    self.list.currentRow() + step)))
+            # The chip column follows the cursor; a row with no chip drops
+            # the stick back into the list rather than leaving it on nothing.
+            if self._zone == "play" and not self._current_ready():
+                self._zone = "list"
+                self._paint_focus()
         else:
             # WRAPS, operator 2026-08-26: "run all button continuous". Off the
             # bottom returns to the top and vice versa, so the column is a ring
@@ -1446,9 +1500,11 @@ class UsbChooser(QDialog):
             self._paint_focus()
 
     def _activate(self):
-        """SAVE pressed: tick the row, or press the focused button."""
+        """SAVE pressed: tick the row, play it, or press the focused button."""
         if self._zone == "list":
             self._toggle_current()
+        elif self._zone == "play":
+            self._play()
         else:
             btn = self._buttons()[self._btn_index]
             if btn.isEnabled():
@@ -1457,7 +1513,7 @@ class UsbChooser(QDialog):
     # -- playback -------------------------------------------------------------
 
     def _play(self):
-        """Watch the highlighted recording full screen. SAVE brings this back.
+        """The row's PLAY chip: watch that recording full screen. SAVE returns.
 
         Not modal - see playback.py. The chooser keeps receiving snapshots and
         on_inputs() routes them to _player_inputs() while _player is set.
