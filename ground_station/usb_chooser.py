@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import time
 
-from PySide6.QtCore import QRectF, QSize, Qt, QThread, Signal, QTimer
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QThread, Signal, QTimer
 from PySide6.QtGui import (QColor, QFont, QIcon, QPainter, QPainterPath, QPen,
                            QPixmap, QRegion)
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout, QLabel,
@@ -1037,6 +1037,7 @@ class UsbChooser(QDialog):
         self._modal_index = 0
         self._modal_h_dir = 0
         self._modal_saves = None
+        self._modal_sorted = False   # buttons put in on-screen order yet?
         # The full-screen player, while it is up - see _play() and on_inputs().
         self._player = None
         self._player_saves = None
@@ -1660,6 +1661,23 @@ class UsbChooser(QDialog):
         choice back and forth, and the SAVE count is compared with > so a
         counter reset cannot fire a phantom press.
         """
+        # THE STICK WALKS THE BUTTONS IN THE ORDER THEY SIT ON SCREEN. The
+        # list was built as [Cancel, Delete] and index 0 called "left", but
+        # QMessageBox lays its standard buttons out by platform style, and on
+        # the Pi that is Delete on the LEFT and Cancel on the RIGHT - so with
+        # Cancel lit, left did nothing and right jumped to Delete. Operator
+        # 2026-09-12: "cancel is highlighted, then i left throttle, it stuck,
+        # like current is reversed there". Geometry is only real once the
+        # popup is up, which is now, so sort on the first snapshot and keep
+        # the cursor on the button it was on.
+        if not self._modal_sorted and self._modal_buttons:
+            if all(b.width() > 0 for b in self._modal_buttons):
+                on = self._modal_buttons[self._modal_index]
+                self._modal_buttons.sort(
+                    key=lambda b: b.mapToGlobal(QPoint(0, 0)).x())
+                self._modal_index = self._modal_buttons.index(on)
+                self._modal_sorted = True
+                self._paint_modal()
         joy = (snap or {}).get("joy") or {}
         h = _stick_lr(joy)          # the SAME axis the chooser uses
         if h is not None and abs(h) >= self.NAV_DEADBAND:
@@ -1744,6 +1762,7 @@ class UsbChooser(QDialog):
                                            box.button(QMessageBox.Yes)) if b]
         self._modal_index = 0
         self._modal_h_dir = 0
+        self._modal_sorted = False   # see _modal_inputs: ordered once shown
         # Primed to None so the FIRST snapshot only records the count. A save
         # press that was already counted before the popup opened must not
         # answer it.
