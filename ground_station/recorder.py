@@ -1785,8 +1785,9 @@ class SessionManager:
     back out. Everything below the API is idempotent, so calling set_state()
     thirty times a second with the same value costs nothing.
 
-    Layout on disk - one directory per session, one file per camera per clip,
-    plus the side-by-side FULL VIEW (see CombinedView):
+    Layout on disk - one directory per session, one file per RECORDED camera
+    per clip (config.RECORD_CAMERAS: the front camera alone by default), plus
+    the side-by-side FULL VIEW when more than one is recorded (see CombinedView):
 
         /recordings/20260815_134500_SESSION001/cam1_front_001.mp4
                                                cam2_back_001.mp4
@@ -1803,7 +1804,19 @@ class SessionManager:
         # Before anything opens a file: clear temporaries a killed viewer
         # left behind, and the empty session folders they pinned in place.
         _sweep_orphans(self.root)
-        sources = list(streams)
+        # ONLY THE CAMERAS config.RECORD_CAMERAS NAMES GET A RECORDER - the
+        # front one alone by default, operator 2026-09-12. Cut here, at the one
+        # place the recorder list is built, so the clip paths, the join, the
+        # labels and the full view all follow without knowing. Each stream
+        # keeps its CAMERA number alongside, because the FRONT/BACK label comes
+        # from that number and not from a position in a list with a hole in it.
+        indexed = [(i, s) for i, s in enumerate(streams)
+                   if config.camera_recorded(i)]
+        if not indexed:
+            # A RECORD_CAMERAS naming only cameras that do not exist would
+            # record nothing. Footage beats a typo: fall back to every camera.
+            indexed = list(enumerate(streams))
+        sources = [s for _i, s in indexed]
         # The FULL VIEW is a session output, so it is created here rather than
         # by main.py: anything that records through a SessionManager gets the
         # combined file with no extra wiring, the headless test included.
@@ -1814,6 +1827,10 @@ class SessionManager:
                 s, getattr(s, "slug", None) or s.name.lower().replace(" ", ""))
             for s in sources
         ]
+        # The streams this session writes, by slug, so main.py can ask
+        # records() and keep the REC tag off a camera that is only on screen.
+        self._recorded_slugs = {
+            rec.slug for rec in self.recorders[:len(indexed)]}
         for rec in self.recorders:
             rec.start()
 
@@ -1848,11 +1865,14 @@ class SessionManager:
         # nothing on disk records which camera started late.
         self._clip_members = {}
         self._clip_offsets = {}
-        # Display labels for the burned-in tile captions, by slug.
-        self._labels = {
-            rec.slug: (config.camera_label(i) or rec.slug)
-            for i, rec in enumerate(self.recorders)
-        }
+        # Display labels for the burned-in tile captions, by slug. Looked up by
+        # CAMERA number, not recorder position: with the back camera the only
+        # one recorded, recorder 0 is CAM 2 and must still read BACK.
+        self._labels = {}
+        for (i, _s), rec in zip(indexed, self.recorders):
+            self._labels[rec.slug] = config.camera_label(i) or rec.slug
+        for rec in self.recorders[len(indexed):]:
+            self._labels[rec.slug] = rec.slug       # the full view, if any
         # The running (or last) full-view build. See FullViewBuilder.
         self._builder = None
         # Kept sessions whose build has not started yet, oldest first. A save
@@ -1865,6 +1885,12 @@ class SessionManager:
         # done, nothing has taken it away yet" (READY TO TRANSFER) apart from
         # "done and already on a stick".
         self._built_at = None
+
+    def records(self, stream):
+        """True if `stream` is one this session writes (see RECORD_CAMERAS)."""
+        slug = (getattr(stream, "slug", None)
+                or getattr(stream, "name", "").lower().replace(" ", ""))
+        return slug in self._recorded_slugs
 
     # -- clock ----------------------------------------------------------------
 
@@ -2161,9 +2187,12 @@ class SessionManager:
             for clip, entries in (pending.get("members") or {}).items()
         }
         # A one-camera clip can never be a side-by-side, but it still wants
-        # normalising, so the >1 rule only applies when building is all this
-        # thread would have to do.
-        least = 1 if config.RECORD_NORMALIZE else 2
+        # normalising AND joining - with RECORD_CAMERAS at its front-only
+        # default EVERY clip is one camera, and dropping it here would leave
+        # the session as cam1_front_001.mp4 with no 1_front.mp4 ever made. The
+        # >1 rule only applies when building is all this thread would have to do.
+        least = (1 if (config.RECORD_NORMALIZE or config.RECORD_JOIN_CLIPS)
+                 else 2)
         members = {c: e for c, e in members.items() if len(e) >= least}
         if not members:
             return

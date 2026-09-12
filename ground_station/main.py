@@ -452,9 +452,10 @@ class CameraPanel(QWidget):
         #
         # ON THE PANEL RATHER THAN THE TOP BAR because "is THIS being kept" is a
         # question about a picture, and the answer belongs on the picture. Both
-        # panels carry one: a session records every camera, so one bar-wide chip
-        # could never say WHICH feed was safe, and two tags say it without the
-        # operator moving their eyes off the video.
+        # panels carry one and each answers for its OWN feed - with
+        # RECORD_CAMERAS at its front-only default the back panel stays blank
+        # while the front reads REC, which one bar-wide chip could never say.
+        # Two tags say it without the operator moving their eyes off the video.
         #
         # It is only ever REC or PAUSED - see set_recording(). The post-session
         # PROCESSING / MERGING run stays on the strip, because by then there is
@@ -1166,7 +1167,11 @@ class GroundStationWindow(QWidget):
         try:
             self.inputs_panel.set_state(snapshot, status)
             for panel in self.panels:
-                panel.set_recording(status)
+                # A camera that is only on screen (config.RECORD_CAMERAS) never
+                # shows REC: the tag answers "is THIS picture being kept", and
+                # for the back camera the honest answer is no.
+                panel.set_recording(
+                    status if self.session.records(panel.stream) else None)
             self.topbar.set_usb(status.get("usb"))
         except Exception:
             traceback.print_exc()

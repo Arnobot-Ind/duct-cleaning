@@ -50,6 +50,41 @@ def camera_slug(index):
     return f"cam{index + 1}_{label.lower()}" if label else f"cam{index + 1}"
 
 
+# WHICH CAMERAS A SESSION WRITES TO DISK. Operator 2026-09-12: "i want to keep
+# just front camera video needed to store". The back camera is for driving;
+# the front one is the footage. Writing both doubled the card, the stick and
+# the join for a file nobody opened.
+#
+# Camera NUMBERS as the panel shows them - "1" is CAM 1 · FRONT alone, "1,2"
+# is both, "2" the back alone - and an empty value records every camera. The
+# screen is untouched: every camera is still decoded and shown, this only
+# decides what a session records. The REC tag on a panel follows it, so a
+# camera that is not being written never claims to be.
+_RECORD_CAMERAS_RAW = os.environ.get("RECORD_CAMERAS", "1")
+
+
+def _parse_camera_numbers(raw):
+    """'1,2' -> {0, 1}; empty or nothing valid -> None, meaning every camera.
+
+    Nothing-valid falls back to ALL rather than NONE on purpose: a typo in an
+    environment file must not silently produce a session with no video in it.
+    """
+    picked = set()
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if token.isdigit() and int(token) >= 1:
+            picked.add(int(token) - 1)
+    return picked or None
+
+
+RECORD_CAMERAS = _parse_camera_numbers(_RECORD_CAMERAS_RAW)
+
+
+def camera_recorded(index):
+    """True if camera `index` (0-based) is written to disk during a session."""
+    return RECORD_CAMERAS is None or index in RECORD_CAMERAS
+
+
 # (label, url) pairs rendered left-to-right in the GUI.
 CAMERAS = [
     (camera_name(0), CAM1_URL),
@@ -311,7 +346,8 @@ SNAPSHOT_DIR = os.path.expanduser(os.environ.get("SNAPSHOT_DIR", "~/snapshots"))
 # Driven by the two panel switches (see inputs.py): switch 1 on GPIO22 is
 # START/STOP, switch 2 on GPIO11 is PAUSE/RESUME. Each run gets its own
 # directory under RECORD_DIR, named YYYYMMDD_HHMMSS_SESSIONnnn, with one file
-# per camera inside it.
+# per RECORDED camera inside it - the front one alone unless RECORD_CAMERAS
+# (above, next to the camera labels) says otherwise.
 #
 # /recordings (not ~/recordings) is the spec: ONE fixed folder on the Pi that
 # the USB backup daemon (usb_backup.py) mirrors verbatim onto any stick that
