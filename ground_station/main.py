@@ -3,10 +3,10 @@
 Ground Station — dual RTSP test viewer (PySide6).
 
 A deliberately simple bring-up UI: a status top bar (logo, per-camera chips,
-robot link, clock — see topbar.py) over two side-by-side camera panels that
-reconnect on their own. No joystick / no command sending yet — this exists
-purely to prove both RTSP streams decode on the ground station Pi before you
-wire in Steps 5-9 of the guide.
+robot link, clock — see topbar.py) over the camera panels, which reconnect on
+their own. ONE panel is shown at a time (config.VIEW_SINGLE, front first) and
+the panel SAVE button swaps to the other; VIEW_SINGLE=0 puts the pair back
+side by side.
 
 Run:
     python3 main.py
@@ -14,16 +14,18 @@ Run:
 
 On Windows, launch run_ground_station.pyw instead — same app, no console window.
 
-Recording is on the panel switches, not the keyboard (see recorder.py):
+Recording is on the panel switches, not the keyboard (see recorder.py and
+inputs.py for the live pin map):
 
-    switch 1, GPIO22 ... START / STOP
-    switch 2, GPIO11 ... PAUSE / RESUME, inside the same file
-    button,   GPIO9 .... SAVE - bank the clip so far and keep rolling
+    switch 1, GPIO11 ... START / STOP
+    switch 2, GPIO17 ... PAUSE / RESUME, inside the same file
+    button,   GPIO5 .... SAVE - swaps which camera is on screen; inside the
+                         USB chooser popup it ticks the row instead
 
 Keys:
     F        fullscreen toggle        S       snapshot both panels
     R        reconnect both           1/2     solo a camera, 0 = both
-    Q / Esc  quit
+    C        swap camera (= SAVE)     Q / Esc quit
     Space    start/stop  P  pause     Ctrl+S  save clip   (bench only - these
              do nothing while the panel switches are readable)
 """
@@ -754,6 +756,16 @@ class GroundStationWindow(QWidget):
         video_row.setSpacing(theme.SPACE_3)
         for panel in self.panels:
             video_row.addWidget(panel, 1)
+        # ONE CAMERA AT A TIME - config.VIEW_SINGLE. Which panel is up lives in
+        # _shown; the SAVE button advances it (see _swap_on_save) and keys
+        # 1 / 2 / 0 / C still set it directly. Done here, after the row owns
+        # the panels, so the hidden one is hidden inside its layout and the
+        # visible one takes the whole width.
+        self._shown = None
+        self._swap_last = None
+        if config.VIEW_SINGLE and len(self.panels) > 1:
+            self.solo(max(0, min(len(self.panels) - 1,
+                                 config.VIEW_START_CAMERA - 1)))
 
         # No footer: every action it held has a key, the keys are listed in the
         # module docstring, and on the ground station there is no mouse in the
@@ -883,6 +895,7 @@ class GroundStationWindow(QWidget):
         bind("1", lambda: self.solo(0))
         bind("2", lambda: self.solo(1))
         bind("0", lambda: self.solo(None))
+        bind("C", self.swap_camera)
         # Recording, for a bench with no panel wired to it. Ignored the moment
         # the switches are readable — see _session_state().
         bind("Space", self.kbd_start_stop)
@@ -1011,8 +1024,43 @@ class GroundStationWindow(QWidget):
         return state if state is not None else (self._kbd_session or "STOPPED")
 
     def solo(self, index):
+        """Show only panel `index`, or every panel for None."""
+        self._shown = index
         for i, panel in enumerate(self.panels):
             panel.setVisible(index is None or i == index)
+
+    def swap_camera(self):
+        """Put the other camera on screen - the panel SAVE button and the C key.
+
+        From the side-by-side view (0 key) the first swap lands on CAM 2, so
+        pressing SAVE always changes what is on screen.
+        """
+        if len(self.panels) < 2:
+            return
+        current = self._shown if self._shown is not None else 0
+        self.solo((current + 1) % len(self.panels))
+
+    def _swap_on_save(self, presses):
+        """One camera swap per new SAVE press - see config.VIEW_SINGLE.
+
+        Same edge discipline as SessionManager.on_save_button: the first value
+        only primes the counter, so a viewer restarted mid-shift does not swap
+        on a press it never saw; a counter that has gone DOWN re-primes, because
+        the reader zeroes it whenever it loses the pins and everything after
+        that would otherwise be swallowed until it climbed back past the old
+        count. The USB chooser owns the button while it is open - _tick_body
+        drops the primer then, so presses spent ticking rows in the popup
+        cannot flip the picture the instant it closes.
+        """
+        if not config.VIEW_SINGLE:
+            return
+        presses = presses or 0
+        if self._swap_last is None or presses < self._swap_last:
+            self._swap_last = presses
+            return
+        if presses > self._swap_last:
+            self._swap_last = presses
+            self.swap_camera()
 
     def toggle_fullscreen(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
@@ -1070,7 +1118,12 @@ class GroundStationWindow(QWidget):
 
     def _tick_body(self):
         for index, panel in enumerate(self.panels):
-            panel.refresh()
+            # A hidden panel (VIEW_SINGLE) skips the frame-to-pixmap copy - it
+            # is the one per-frame cost the UI pays per camera, and nobody can
+            # see the result. Its _last_seq goes stale, so the first tick after
+            # a swap redraws it with the newest frame.
+            if not panel.isHidden():
+                panel.refresh()
             stream = panel.stream
             self.topbar.set_camera(
                 index, stream.connected, stream.fps, stream.status_text
@@ -1139,9 +1192,12 @@ class GroundStationWindow(QWidget):
             # session". Both are held off until the popup closes, at which point
             # set_state() sees the real switch again and carries on.
             self._usb_dialog.on_inputs(snapshot)
+            self._swap_last = None
         else:
             self.session.set_state(self._session_state(snapshot))
             self.session.on_save_button(snapshot.get("save_presses"))
+            # Outside the popup the SAVE button swaps the camera on screen.
+            self._swap_on_save(snapshot.get("save_presses"))
         # The hold level as well as the press edges: holding SAVE for 3s after
         # a stop is what finalizes the recording into /recordings.
         if self._usb_dialog is None:

@@ -85,6 +85,27 @@ def camera_recorded(index):
     return RECORD_CAMERAS is None or index in RECORD_CAMERAS
 
 
+# ONE CAMERA ON SCREEN AT A TIME. Operator 2026-09-12: "i want just display one
+# camera at once ... by default front camera and can be change by pressing
+# save button". The two panels shared a 1024-wide screen, so each picture was
+# half size; one at a time gives the picture the whole width.
+#
+# VIEW_SINGLE=1 shows one panel - VIEW_START_CAMERA (1 = CAM 1 · FRONT) first -
+# and the panel SAVE button (GPIO5) swaps to the other. Both streams keep
+# decoding underneath, so the swap is instant and the top-bar chips still
+# report both cameras. Recording is unaffected: the recorder reads the streams,
+# not the panels, so the front camera records whichever one is on screen.
+#
+# The SAVE button was free for this: banking a clip on it is off
+# (RECORD_SAVE_BUTTON), and its one live job - ticking rows in the USB chooser
+# - is kept, because the popup owns the button while it is open. Do not turn
+# RECORD_SAVE_BUTTON back on with this set, or one press would do both.
+#
+# VIEW_SINGLE=0 restores the side-by-side pair. Keys 1 / 2 / 0 / C work either way.
+VIEW_SINGLE = os.environ.get("VIEW_SINGLE", "1") == "1"
+VIEW_START_CAMERA = int(os.environ.get("VIEW_START_CAMERA", "1") or 1)
+
+
 # (label, url) pairs rendered left-to-right in the GUI.
 CAMERAS = [
     (camera_name(0), CAM1_URL),
