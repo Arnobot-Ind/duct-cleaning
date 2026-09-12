@@ -679,6 +679,27 @@ RECORD_MAX_WIDTH = int(os.environ.get("RECORD_MAX_WIDTH", "0"))
 # inside both cameras' frames, so neither is ever upscaled to reach it.
 RECORD_SQUARE_PX = int(os.environ.get("RECORD_SQUARE_PX", "720"))
 
+# A DIGITAL-RECORDER TIMESTAMP IN THE TOP-RIGHT OF EVERY RECORDED FRAME.
+# Operator 2026-09-12: "a small white digital recording timestamp overlay
+# showing date and time, formatted as 2026-09-12 13:42:18, slightly
+# transparent, monospaced digital font, subtle camera-recorder OSD style,
+# fixed to the video frame ... i want to store time also". Footage from a duct
+# now says WHEN as well as what, inside the pixels, so it survives every copy.
+#
+# Burned in by the ENCODER thread only (recorder.TimestampOsd): the live
+# screen keeps the clean picture, and the stamp is drawn on a copy so the
+# decode buffer the panels share is never written to. On the Pi it renders
+# DejaVu Sans Mono Bold through OpenCV's freetype module; a build without
+# freetype falls back to OpenCV's Hershey font, same place, same size.
+#
+# Cost: one small alpha blend per frame (a strip ~250x28 px on a 720 frame)
+# plus one glyph render per SECOND, because the text only changes then.
+RECORD_TIMESTAMP = os.environ.get("RECORD_TIMESTAMP", "1") == "1"
+RECORD_TIMESTAMP_FORMAT = os.environ.get("RECORD_TIMESTAMP_FORMAT",
+                                         "%Y-%m-%d %H:%M:%S")
+# 1.0 is solid white; the spec asked for slightly transparent.
+RECORD_TIMESTAMP_ALPHA = float(os.environ.get("RECORD_TIMESTAMP_ALPHA", "0.85"))
+
 # Re-encode the per-camera masters AFTER a save so the two cameras produce files
 # of the same SIZE, not merely the same pixel dimensions (operator spec
 # 2026-08-19: "one file store too much size and other low").

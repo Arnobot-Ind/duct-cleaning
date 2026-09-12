@@ -685,6 +685,10 @@ class CameraRecorder(threading.Thread):
         # operator two different instants side by side and call it one frame.
         # Publishing the instant lets the session turn it into a lead-in pad.
         self._clip_first_write = None
+        # The burned-in timestamp, built on the first frame (it is sized from
+        # the frame) and rebuilt if the frame height ever changes. See
+        # TimestampOsd and config.RECORD_TIMESTAMP.
+        self._osd = None
 
     # -- public ---------------------------------------------------------------
 
@@ -785,6 +789,24 @@ class CameraRecorder(threading.Thread):
         if self._writer is not None:
             self._writer.release()
         self._writer, self._size = None, None
+
+    def _stamped(self, frame):
+        """`frame` with the OSD timestamp, on a COPY - the original is shared.
+
+        Never lets a caption cost footage: any failure in the renderer hands
+        the clean frame straight back to the encoder.
+        """
+        h = frame.shape[0]
+        if self._osd is None or self._osd.for_height != h:
+            try:
+                self._osd = TimestampOsd(h, config.RECORD_TIMESTAMP_ALPHA)
+            except Exception:
+                self._osd = None
+                return frame
+        try:
+            return self._osd.stamp(frame)
+        except Exception:
+            return frame
 
     def _write(self, frame):
         w, h = self._size
@@ -929,6 +951,9 @@ class CameraRecorder(threading.Thread):
                         self._stopping.wait(5.0)
                         continue
 
+                if config.RECORD_TIMESTAMP:
+                    frame = self._stamped(frame)
+
                 try:
                     self._write(frame)
                 except Exception as exc:            # encoder blew up mid-clip
@@ -961,6 +986,134 @@ _FONT = next((f for f in (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 ) if os.path.exists(f)), "")
+
+# A MONOSPACED face for the recorder timestamp - see TimestampOsd. Fixed-width
+# digits are what stop the stamp jittering as the seconds tick over. Bold, so
+# it reads at the small size a corner caption has to be.
+_MONO_FONT = next((f for f in (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+) if os.path.exists(f)), "")
+
+
+class TimestampOsd:
+    """Burns "2026-09-12 13:42:18" into the top-right of a recorded frame.
+
+    The look the operator asked for (2026-09-12): small, white, slightly
+    transparent, monospaced, camera-recorder OSD, fixed to the frame. A thin
+    dark halo under the glyphs keeps it legible over a bright duct wall
+    without turning it into a box.
+
+    HOW IT STAYS CHEAP. The text changes once a second, so the glyphs are
+    rendered once a second into a fixed-size strip whose alpha is kept as
+    float; every frame then pays one blend over that strip (~250x28 px on a
+    720 frame) and one frame copy. The strip's size and the ink position
+    inside it are measured ONCE at construction from reference renders, so
+    the stamp sits in exactly the same pixels from one second to the next.
+
+    Backend: OpenCV's freetype module with _MONO_FONT when both exist (the
+    Pi), else the built-in Hershey font. Hershey is not quite monospaced, so
+    the strip carries a little slack on the right for it.
+    """
+
+    def __init__(self, frame_h, alpha):
+        self.for_height = frame_h
+        self.alpha = max(0.0, min(1.0, float(alpha)))
+        self.px = max(12, frame_h // 32)            # 22 px glyphs on a 720 frame
+        self.margin = max(6, frame_h // 45)         # 16 px in from the edges
+        self.pad = 3
+        self._ft = None
+        if _MONO_FONT and hasattr(cv2, "freetype"):
+            try:
+                ft = cv2.freetype.createFreeType2()
+                ft.loadFontData(_MONO_FONT, 0)
+                self._ft = ft
+            except Exception:
+                self._ft = None
+        self.backend = "freetype" if self._ft is not None else "hershey"
+        # A scratch canvas big enough for any timestamp at this size; the ink
+        # lands in the same place on every render because the origin is fixed.
+        self._org = (self.px, 2 * self.px)
+        self._canvas_hw = (4 * self.px, 28 * self.px)
+        self._crop = self._measure()
+        self._text = None
+        self._a_txt = None
+        self._a_halo = None
+
+    # -- rendering ------------------------------------------------------------
+
+    def _draw(self, text):
+        """The glyph mask for `text` on the scratch canvas, uint8 0..255."""
+        h, w = self._canvas_hw
+        canvas = np.zeros((h, w, 3), np.uint8)
+        if self._ft is not None:
+            self._ft.putText(canvas, text, self._org, self.px,
+                             (255, 255, 255), -1, cv2.LINE_AA, False)
+        else:
+            # Hershey's cap height is ~22 px at scale 1; org is the baseline.
+            scale = self.px / 22.0
+            thick = max(1, int(round(self.px / 11.0)))
+            cv2.putText(canvas, text, (self._org[0], self._org[1] + self.px),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255),
+                        thick, cv2.LINE_AA)
+        return canvas[:, :, 0]
+
+    @staticmethod
+    def _bbox(mask):
+        ys, xs = np.where(mask > 0)
+        if len(ys) == 0:
+            return None
+        return int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
+
+    def _measure(self):
+        """(y0, y1, x0, x1) of the strip on the scratch canvas.
+
+        Height from every glyph the stamp can contain, so a '-' sitting low
+        or a ':' sitting high never changes the strip; width from a real
+        timestamp, which is the same length every second.
+        """
+        tall = self._bbox(self._draw("0123456789-:"))
+        wide = self._bbox(self._draw(
+            datetime.now().strftime(config.RECORD_TIMESTAMP_FORMAT)))
+        if tall is None or wide is None:
+            raise RuntimeError("timestamp font rendered nothing")
+        slack = 0 if self._ft is not None else self.px // 2
+        y0 = max(0, tall[0] - self.pad)
+        y1 = min(self._canvas_hw[0], tall[1] + self.pad)
+        x0 = max(0, wide[2] - self.pad)
+        x1 = min(self._canvas_hw[1], wide[3] + self.pad + slack)
+        return y0, y1, x0, x1
+
+    def _compose(self, text):
+        y0, y1, x0, x1 = self._crop
+        mask = self._draw(text)[y0:y1, x0:x1]
+        halo = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+        self._a_txt = (mask.astype(np.float32) / 255.0 * self.alpha)[..., None]
+        self._a_halo = (halo.astype(np.float32) / 255.0
+                        * self.alpha * 0.75)[..., None]
+        self._text = text
+
+    # -- per frame --------------------------------------------------------------
+
+    def stamp(self, frame):
+        """A copy of `frame` with the current time in its top-right corner."""
+        text = datetime.now().strftime(config.RECORD_TIMESTAMP_FORMAT)
+        if text != self._text:
+            self._compose(text)
+        a_txt, a_halo = self._a_txt, self._a_halo
+        sh, sw = a_txt.shape[:2]
+        fh, fw = frame.shape[:2]
+        if sh + self.margin > fh or sw + self.margin > fw:
+            return frame                      # frame too small for a caption
+        y0, x0 = self.margin, fw - self.margin - sw
+        out = frame.copy()
+        roi = out[y0:y0 + sh, x0:x0 + sw].astype(np.float32)
+        roi *= (1.0 - a_halo)                             # dark halo first
+        roi = roi * (1.0 - a_txt) + 255.0 * a_txt         # then white glyphs
+        out[y0:y0 + sh, x0:x0 + sw] = roi.astype(np.uint8)
+        return out
 
 
 class FullViewBuilder(threading.Thread):
