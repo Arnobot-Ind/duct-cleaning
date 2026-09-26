@@ -690,6 +690,77 @@ class CameraPanel(QWidget):
         self.dot.setStyleSheet(f"color: {'#38c172' if connected else '#e0564a'};")
 
 
+class HoldHint(QWidget):
+    """The pill at the top of the viewer while SAVE is held towards playback.
+
+    Operator 2026-09-26: "show in top like press 3 second to open playback
+    view". Same shape as the player's own exit-hold pill (playback.py
+    _paint_exit_hold), so the two holds read as one gesture: text, and a bar
+    filling towards the moment it fires. Letting go before then hides it.
+
+    A child of the window floated over the video, never in a layout - it must
+    not push the panels around when it appears. Ignores the mouse.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._frac = 0.0
+        self._k = 1.0
+        self._need = config.PLAYBACK_HOLD_S
+        self.hide()
+
+    def set_hold(self, held_s, need_s, top):
+        """held_s of need_s done; `top` is the y to sit below. 0 hides it."""
+        if held_s <= 0.0 or need_s <= 0.0:
+            if self.isVisible():
+                self.hide()
+            return
+        parent = self.parentWidget()
+        k = max(1.0, parent.height() / 720.0)
+        self._k = k
+        self._frac = max(0.0, min(1.0, held_s / need_s))
+        self.setFont(theme.font_for(int(theme.SUBHEAD * k), theme.W_SEMIBOLD))
+        fm = self.fontMetrics()
+        w = int(fm.horizontalAdvance(self._text(need_s)) + 48 * k)
+        h = int(fm.height() + 28 * k)
+        geo = (int((parent.width() - w) / 2), int(top + 16 * k), w, h)
+        if self.geometry().getRect() != geo:
+            self.setGeometry(*geo)
+        self._need = need_s
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.update()
+
+    @staticmethod
+    def _text(need_s):
+        return "Hold SAVE %g s to open playback" % need_s
+
+    def paintEvent(self, _event):
+        k = self._k
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect())
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 190))
+        p.drawRoundedRect(r, r.height() / 2.0, r.height() / 2.0)
+        p.setFont(self.font())
+        fm = p.fontMetrics()
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(QRectF(0, 6 * k, r.width(), fm.height()), Qt.AlignCenter,
+                   self._text(self._need))
+        track = QRectF(24 * k, r.height() - 12 * k, r.width() - 48 * k, 4 * k)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 60))
+        p.drawRoundedRect(track, 2 * k, 2 * k)
+        p.setBrush(QColor(theme.DARK["blue"]))
+        p.drawRoundedRect(QRectF(track.x(), track.y(), track.width() * self._frac,
+                                 track.height()), 2 * k, 2 * k)
+        p.end()
+
+
 class GroundStationWindow(QWidget):
     def __init__(self, cameras):
         super().__init__()
@@ -824,6 +895,8 @@ class GroundStationWindow(QWidget):
         # controls, and the strip is fixed-height so it never steals from the
         # panels as the window grows.
         root.addWidget(self.inputs_panel)
+        # Floats over the video, outside the layout - see _save_button.
+        self.hold_hint = HoldHint(self)
 
         self.setStyleSheet(STYLESHEET)
         self._install_shortcuts()
@@ -1077,10 +1150,16 @@ class GroundStationWindow(QWidget):
         """
         if self._usb_dialog is not None:
             return
+        # A STICK STILL IN gets the full card, Save to USB included. The
+        # chooser opens on its own only once per stick (_usb_dev_shown), so
+        # after the operator closes it this hold is the way back - and a
+        # playback-only window then would hide the button the stick is for.
+        usb = self._usb_status() or {}
+        mount = usb.get("mount") if usb.get("state") == "mounted" else None
         try:
             from usb_chooser import UsbChooser
-            self._usb_dialog = UsbChooser(config.RECORD_DIR, None, self,
-                                          playback_only=True)
+            self._usb_dialog = UsbChooser(config.RECORD_DIR, mount, self,
+                                          playback_only=not mount)
             self._usb_dialog.finished.connect(self._usb_dialog_closed)
             self._usb_dialog.show()
         except Exception as exc:          # never take the viewer down
@@ -1147,12 +1226,22 @@ class GroundStationWindow(QWidget):
             self.swap_camera()
 
         # The hold. Fires once per hold; only a release re-arms it.
-        if held >= config.PLAYBACK_HOLD_S:
-            if not self._hold_fired:
-                self._hold_fired = True
-                self._open_playback()
-        elif held <= 0.0:
+        if held <= 0.0:
             self._hold_fired = False
+        elif self.session.pending_left() is not None:
+            # A stopped recording is waiting for ITS save hold: this hold is
+            # that one, and must not run on into playback - see
+            # config.PLAYBACK_HOLD_S. Spent, so it stays dead after the save
+            # lands mid-hold, until the button comes back up.
+            self._hold_fired = True
+        elif held >= config.PLAYBACK_HOLD_S and not self._hold_fired:
+            self._hold_fired = True
+            self._open_playback()
+        # The countdown pill, only for a hold still on its way to playback.
+        live = (not self._hold_fired
+                and held >= config.PLAYBACK_HINT_AFTER_S)
+        self.hold_hint.set_hold(held if live else 0.0, config.PLAYBACK_HOLD_S,
+                                self.topbar.geometry().bottom())
 
     def toggle_fullscreen(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
@@ -1286,6 +1375,9 @@ class GroundStationWindow(QWidget):
             self._usb_dialog.on_inputs(snapshot)
             self._swap_last = None
             self._swap_armed = False
+            # A hold still down when the popup closes belongs to the popup.
+            self._hold_fired = True
+            self.hold_hint.set_hold(0.0, config.PLAYBACK_HOLD_S, 0)
         else:
             self.session.set_state(self._session_state(snapshot))
             self.session.on_save_button(snapshot.get("save_presses"))
