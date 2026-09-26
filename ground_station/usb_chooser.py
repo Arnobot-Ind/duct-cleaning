@@ -1043,6 +1043,8 @@ class UsbChooser(QDialog):
         self._player = None
         self._player_saves = None
         self._player_h_dir = 0
+        self._player_tap = False         # SAVE pressed, pause due on release
+        self._player_hold_ok = False     # SAVE seen up since the player opened
         self.setWindowTitle("USB DRIVE")
         self.setModal(True)
         # BIGGER, operator 2026-08-26: "big some size in main popup". 760x460
@@ -1567,34 +1569,68 @@ class UsbChooser(QDialog):
         # press that opened the player must not also close it.
         self._player_saves = None
         self._player_h_dir = 0
+        self._player_tap = False
+        self._player_hold_ok = False
         player.finished.connect(self._player_done)
         player.start()
 
     def _player_inputs(self, snap):
-        """Drive the player from the stick: left / right skip, SAVE leaves.
+        """Drive the player from the stick: left / right seek, SAVE pauses or
+        leaves.
 
-        Edge-triggered on both, like _modal_inputs: holding the stick over
-        must not keep skipping, and the SAVE count is compared with > so a
+        The stick's direction goes to the player every frame and the player
+        owns the timing - tap = skip, hold = rewind / forward, see
+        PlaybackView.stick.
+
+        SAVE: a tap pauses / resumes, a hold of playback.EXIT_HOLD_S leaves.
+        THE TAP FIRES ON RELEASE, for the reason main._save_button gives:
+        every hold begins with a press, and pausing on the press would freeze
+        the picture on the way out every time. A new press only arms the tap;
+        it fires when the button comes back up, and is disarmed once the hold
+        passes config.SAVE_TAP_MAX_S. The press count is compared with > so a
         counter reset cannot fire a phantom press.
+
+        The exit hold only counts once SAVE has been seen UP inside the player
+        - the press that opened it may still be down, and must not also close
+        it three seconds later.
         """
         joy = (snap or {}).get("joy") or {}
         h = _stick_lr(joy)
         if h is not None and abs(h) >= self.NAV_DEADBAND:
-            if self._player_h_dir == 0:
-                self._player_h_dir = 1 if h > 0 else -1
-                if self._player is not None:
-                    from playback import SKIP_S
-                    self._player.skip(SKIP_S if h > 0 else -SKIP_S)
+            self._player_h_dir = 1 if h > 0 else -1
         else:
             self._player_h_dir = 0
+        if self._player is not None:
+            self._player.stick(self._player_h_dir)
 
+        from playback import EXIT_HOLD_S
+        held = (snap or {}).get("save_held_s") or 0.0
         presses = (snap or {}).get("save_presses")
         if presses is not None and presses != self._player_saves:
-            fire = (self._player_saves is not None
-                    and presses > self._player_saves)
+            if self._player_saves is not None and presses > self._player_saves:
+                self._player_tap = True
             self._player_saves = presses
-            if fire:
-                self._player_done()
+        if held <= 0.0:
+            self._player_hold_ok = True
+            if self._player_tap:
+                self._player_tap = False        # released: the tap is complete
+                if self._player is not None:
+                    self._player.toggle_pause()
+        elif held > config.SAVE_TAP_MAX_S:
+            self._player_tap = False            # a hold, not a tap
+
+        if self._player is None:
+            return
+        if not self._player_hold_ok:
+            self._player.set_exit_hold(0.0)
+            return
+        # The bar appears once it is clearly a hold, not on every tap.
+        if held > config.SAVE_TAP_MAX_S:
+            self._player.set_exit_hold(held / EXIT_HOLD_S)
+        else:
+            self._player.set_exit_hold(0.0)
+        if held >= EXIT_HOLD_S:
+            self._player_done()
 
     def _player_done(self):
         """Close the player - on SAVE, at the end of the file, or on eject."""
@@ -1613,6 +1649,8 @@ class UsbChooser(QDialog):
             self._saves_seen = self._player_saves
         self._player_saves = None
         self._player_h_dir = 0
+        self._player_tap = False
+        self._player_hold_ok = False
         self.activateWindow()
 
     # -- actions --------------------------------------------------------------
