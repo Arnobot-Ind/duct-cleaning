@@ -1,0 +1,21 @@
+# Upload finished /recordings sessions to the Saibya Archive server - see
+# ground_station/cloud_upload.py. Token: ~/.config/cloud_upload/credential.txt
+# Install:  sudo cp cloud-upload.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now cloud-upload
+[Unit]
+Description=Upload finished recordings to the Saibya Archive server when online
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+# Not root: it only reads /recordings and talks HTTP.
+User=arnobot
+ExecStart=/usr/bin/python3 /home/arnobot/DuctCleaning/ground_station/cloud_upload.py
+Restart=always
+RestartSec=10
+# Uploads must never slow the viewer or the recorder down.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
